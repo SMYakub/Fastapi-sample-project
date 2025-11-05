@@ -1,0 +1,101 @@
+# One-to-Many: Category -> Items
+class CategoryModel(Base):
+    __tablename__ = "categories"
+    
+    id = Column(String, primary_key=True, index=True)
+    name = Column(String(100), unique=True, index=True)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime)
+    updated_at = Column(DateTime)
+    
+    # One-to-Many relationship
+    items = relationship("ItemModel", back_populates="category_obj")
+
+# Update ItemModel to include category relationship
+class ItemModel(Base):
+    __tablename__ = "items"
+    
+    id = Column(String, primary_key=True, index=True)
+    name = Column(String(255), index=True)
+    description = Column(Text, nullable=True)
+    price = Column(Float)
+    category = Column(String(100))  # Keeping this for backward compatibility
+    category_id = Column(String, ForeignKey("categories.id"), nullable=True)
+    created_at = Column(DateTime)
+    updated_at = Column(DateTime)
+    
+    # Relationships
+    detail = relationship("ItemDetailModel", back_populates="item", uselist=False)
+    category_obj = relationship("CategoryModel", back_populates="items")
+
+# Pydantic models for Category
+class CategoryCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+
+class CategoryResponse(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    
+    model_config = {"from_attributes": True}
+
+class CategoryWithItemsResponse(CategoryResponse):
+    items: List[ItemResponse] = []
+
+class ItemResponseWithCategory(ItemResponse):
+    category_obj: Optional[CategoryResponse] = None
+
+# API endpoints for one-to-many
+@app.post("/categories/", response_model=CategoryResponse)
+async def create_category(category: CategoryCreate, db: Session = Depends(get_db)):
+    # Check if category already exists
+    existing_category = db.query(CategoryModel).filter(CategoryModel.name == category.name).first()
+    if existing_category:
+        raise HTTPException(status_code=400, detail="Category already exists")
+    
+    category_id = generate_id()
+    current_time = datetime.now()
+    
+    db_category = CategoryModel(
+        id=category_id,
+        name=category.name,
+        description=category.description,
+        created_at=current_time,
+        updated_at=current_time
+    )
+    
+    db.add(db_category)
+    db.commit()
+    db.refresh(db_category)
+    return db_category
+
+@app.get("/categories/{category_id}/items", response_model=CategoryWithItemsResponse)
+async def read_category_with_items(category_id: str, db: Session = Depends(get_db)):
+    category = db.query(CategoryModel).filter(CategoryModel.id == category_id).first()
+    if not category:
+        raise HTTPException(status_code=404, detail="Category not found")
+    return category
+
+@app.put("/items/{item_id}/assign-category/{category_id}")
+async def assign_item_to_category(
+    item_id: str, 
+    category_id: str, 
+    db: Session = Depends(get_db)
+):
+    item = db.query(ItemModel).filter(ItemModel.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    
+    category = db.query(CategoryModel).filter(CategoryModel.id == category_id).first()
+    if not category:
+        raise HTTPException(status_code=404, detail="Category not found")
+    
+    item.category_id = category_id
+    item.category = category.name  # Update the string category as well
+    item.updated_at = datetime.now()
+    
+    db.commit()
+    return {"message": "Item assigned to category successfully"}

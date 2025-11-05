@@ -1,0 +1,152 @@
+# Many-to-Many: Items <-> Tags
+class TagModel(Base):
+    __tablename__ = "tags"
+    
+    id = Column(String, primary_key=True, index=True)
+    name = Column(String(50), unique=True, index=True)
+    created_at = Column(DateTime)
+
+# Association table for many-to-many relationship
+item_tags = Table(
+    'item_tags', Base.metadata,
+    Column('item_id', String, ForeignKey('items.id'), primary_key=True),
+    Column('tag_id', String, ForeignKey('tags.id'), primary_key=True),
+    Column('created_at', DateTime, default=datetime.now)
+)
+
+# Update ItemModel to include many-to-many relationship
+class ItemModel(Base):
+    __tablename__ = "items"
+    
+    id = Column(String, primary_key=True, index=True)
+    name = Column(String(255), index=True)
+    description = Column(Text, nullable=True)
+    price = Column(Float)
+    category = Column(String(100))
+    category_id = Column(String, ForeignKey("categories.id"), nullable=True)
+    created_at = Column(DateTime)
+    updated_at = Column(DateTime)
+    
+    # Relationships
+    detail = relationship("ItemDetailModel", back_populates="item", uselist=False)
+    category_obj = relationship("CategoryModel", back_populates="items")
+    tags = relationship("TagModel", secondary=item_tags, back_populates="items")
+
+# Update TagModel with relationship
+TagModel.items = relationship("ItemModel", secondary=item_tags, back_populates="tags")
+
+# Pydantic models for Tags
+class TagCreate(BaseModel):
+    name: str
+
+class TagResponse(BaseModel):
+    id: str
+    name: str
+    created_at: datetime
+    
+    model_config = {"from_attributes": True}
+
+class ItemResponseWithTags(ItemResponse):
+    tags: List[TagResponse] = []
+
+class TagWithItemsResponse(TagResponse):
+    items: List[ItemResponse] = []
+
+# API endpoints for many-to-many
+@app.post("/tags/", response_model=TagResponse)
+async def create_tag(tag: TagCreate, db: Session = Depends(get_db)):
+    # Check if tag already exists
+    existing_tag = db.query(TagModel).filter(TagModel.name == tag.name).first()
+    if existing_tag:
+        raise HTTPException(status_code=400, detail="Tag already exists")
+    
+    tag_id = generate_id()
+    current_time = datetime.now()
+    
+    db_tag = TagModel(
+        id=tag_id,
+        name=tag.name,
+        created_at=current_time
+    )
+    
+    db.add(db_tag)
+    db.commit()
+    db.refresh(db_tag)
+    return db_tag
+
+@app.post("/items/{item_id}/tags/{tag_id}")
+async def add_tag_to_item(
+    item_id: str, 
+    tag_id: str, 
+    db: Session = Depends(get_db)
+):
+    item = db.query(ItemModel).filter(ItemModel.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    
+    tag = db.query(TagModel).filter(TagModel.id == tag_id).first()
+    if not tag:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    
+    # Check if association already exists
+    existing_association = db.execute(
+        item_tags.select().where(
+            (item_tags.c.item_id == item_id) & 
+            (item_tags.c.tag_id == tag_id)
+        )
+    ).first()
+    
+    if existing_association:
+        raise HTTPException(status_code=400, detail="Tag already assigned to item")
+    
+    # Add the association
+    db.execute(
+        item_tags.insert().values(
+            item_id=item_id,
+            tag_id=tag_id,
+            created_at=datetime.now()
+        )
+    )
+    db.commit()
+    
+    return {"message": "Tag added to item successfully"}
+
+@app.get("/items/{item_id}/with-tags", response_model=ItemResponseWithTags)
+async def read_item_with_tags(item_id: str, db: Session = Depends(get_db)):
+    item = db.query(ItemModel).filter(ItemModel.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return item
+
+@app.get("/tags/{tag_id}/items", response_model=TagWithItemsResponse)
+async def read_tag_with_items(tag_id: str, db: Session = Depends(get_db)):
+    tag = db.query(TagModel).filter(TagModel.id == tag_id).first()
+    if not tag:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    return tag
+
+# Enhanced search with tags
+@app.get("/items/search/advanced", response_model=List[ItemResponseWithTags])
+async def advanced_search_items(
+    name: Optional[str] = None,
+    category: Optional[str] = None,
+    min_price: Optional[float] = None,
+    max_price: Optional[float] = None,
+    tag: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(ItemModel)
+    
+    if name:
+        query = query.filter(ItemModel.name.ilike(f"%{name}%"))
+    if category:
+        query = query.filter(ItemModel.category.ilike(f"%{category}%"))
+    if min_price is not None:
+        query = query.filter(ItemModel.price >= min_price)
+    if max_price is not None:
+        query = query.filter(ItemModel.price <= max_price)
+    if tag:
+        query = query.join(ItemModel.tags).filter(TagModel.name.ilike(f"%{tag}%"))
+    
+    items = query.all()
+    return items

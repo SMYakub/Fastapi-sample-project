@@ -46,3 +46,4 @@ See the full API documentation at `/docs` when running the application.
 - Access the API at: http://localhost:8000
 
 - API documentation at: http://localhost:8000/docs
+
